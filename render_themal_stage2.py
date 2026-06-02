@@ -12,6 +12,7 @@
 import torch
 from scene import Scene
 import os
+import time
 from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render, render_lighting
@@ -25,10 +26,13 @@ from utils.image_utils import apply_depth_colormap
 from utils.general_utils import get_minimum_axis
 from scene.NVDIFFREC.util import save_image_raw
 from utils.ironbow_utils import gray_to_ironbow_tensor
+from utils.performance_utils import cuda_peak_memory, reset_cuda_peak_memory, synchronize_cuda, write_json
 import numpy as np
 
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, time_index = None):
+    render_start = time.perf_counter()
+    inference_seconds = 0.0
     if time_index is None:
         # render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
         render_integral_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders_integral")
@@ -50,6 +54,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         torch.cuda.synchronize()
+        frame_start = time.perf_counter()
         if time_index is not None:
 
             time = torch.tensor(time_index / 120).unsqueeze(0).unsqueeze(0).unsqueeze(0).cuda()
@@ -99,6 +104,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
             gaussians._features_dc = temp_integral.unsqueeze(1).repeat(1, 1, 3)
             render_pkg_integral = render(view, gaussians, pipeline, background, debug=False)
         torch.cuda.synchronize()
+        inference_seconds += time.perf_counter() - frame_start
 
         gt = view.original_image[0:3, :, :]
         render_gray = render_pkg_integral["render"]
@@ -126,22 +132,44 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         #     elif "normal" in k:
         #         render_pkg[k] = 0.5 + (0.5*render_pkg[k])
             # torchvision.utils.save_image(render_pkg[k], os.path.join(save_path, '{0:05d}'.format(idx) + ".png"))
+    end_to_end_seconds = time.perf_counter() - render_start
+    frame_count = len(views)
+    return {
+        "frame_count": frame_count,
+        "inference_seconds": inference_seconds,
+        "render_fps": frame_count / inference_seconds if inference_seconds > 0 else 0.0,
+        "end_to_end_seconds": end_to_end_seconds,
+        "end_to_end_fps": frame_count / end_to_end_seconds if end_to_end_seconds > 0 else 0.0,
+    }
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool):
     with torch.no_grad():
+        render_start = time.perf_counter()
+        reset_cuda_peak_memory()
         gaussians = GaussianModel(dataset.sh_degree, dataset.brdf_dim, pipeline.brdf_mode, dataset.brdf_envmap_res, dataset.feature_time)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        split_metrics = {}
         if not skip_train:
-            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background)
+            split_metrics["train"] = render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background)
 
         if not skip_test:
-            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
+            split_metrics["test"] = render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
         # if dataset.feature_time:
         #     for i in range(120):
         #         render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, i)
+        synchronize_cuda()
+        metrics = {
+            "iteration": scene.loaded_iter,
+            "total_seconds": time.perf_counter() - render_start,
+            "splits": split_metrics,
+            "cuda_peak_memory": cuda_peak_memory(),
+        }
+        output_path = os.path.join(dataset.model_path, "render_metrics.json")
+        write_json(output_path, metrics)
+        print(f"Saved render performance metrics to {output_path}")
             
 if __name__ == "__main__":
     # Set up command line argument parser

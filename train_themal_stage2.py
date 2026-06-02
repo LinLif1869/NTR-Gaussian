@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from utils.performance_utils import reset_cuda_peak_memory, save_training_metrics
 import time
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -33,6 +34,8 @@ except ImportError:
     TENSORBOARD_FOUND = False
 # 预测环境温度和风速，辐射散热公式需要改进，限制temp_integral_sumvalue的大小，对预测的环境温度和风速进行限制
 def training(dataset, opt, pipe, testing_iterations, saving_iterations):
+    training_start = time.perf_counter()
+    reset_cuda_peak_memory()
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, dataset.brdf_dim, dataset.brdf_mode, dataset.brdf_envmap_res, dataset.feature_time)
 
@@ -228,6 +231,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             if pipe.brdf and pipe.brdf_mode=="envmap":
                 gaussians.brdf_mlp.clamp_(min=0.0, max=1.0)
         torch.cuda.empty_cache()
+    save_training_metrics(dataset.model_path, "stage2", training_start, opt.iterations)
 
 def prepare_output_and_logger(args):    
     if not args.model_path:

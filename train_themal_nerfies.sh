@@ -31,3 +31,7 @@ fi
 
 cp -r "$STAGE1_OUTPUT" "$STAGE2_OUTPUT"
 python "$ROOT_DIR/train_themal_stage2.py" -s "$SOURCE_PATH" -m "$STAGE2_OUTPUT"
+python "$ROOT_DIR/utils/performance_utils.py" aggregate-training \
+    "$STAGE1_OUTPUT/training_metrics_stage1.json" \
+    "$STAGE2_OUTPUT/training_metrics_stage2.json" \
+    "$STAGE2_OUTPUT/training_metrics_total.json"
