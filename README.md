@@ -50,6 +50,12 @@ Execute the optimizer using the following command:
 sh train_themal.sh
 ```
 
+For a Nerfies Thermal dataset, run the complete two-stage training, rendering, and
+Ironbow pseudocolor evaluation pipeline with:
+```shell
+./run_nerfies.sh /path/to/nerfies_dataset /path/to/output_root
+```
+
 ## Rendering
 ```shell
 python render_themal_stage2.py -m your_output_path
