@@ -24,6 +24,7 @@ from gaussian_renderer import GaussianModel
 from utils.image_utils import apply_depth_colormap
 from utils.general_utils import get_minimum_axis
 from scene.NVDIFFREC.util import save_image_raw
+from utils.ironbow_utils import gray_to_ironbow_tensor
 import numpy as np
 
 
@@ -32,14 +33,20 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         # render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
         render_integral_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders_integral")
         gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+        render_integral_ironbow_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders_integral_ironbow")
+        gts_ironbow_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt_ironbow")
     else:
         # render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "render_alltime", f"renders_{str(time_index).zfill(5)}")
         render_integral_path = os.path.join(model_path, name, "ours_{}".format(iteration), "render_integral_alltime", f"renders_{str(time_index).zfill(5)}")
         gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), f"gt")
+        render_integral_ironbow_path = os.path.join(model_path, name, "ours_{}".format(iteration), "render_integral_ironbow_alltime", f"renders_{str(time_index).zfill(5)}")
+        gts_ironbow_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt_ironbow")
 
     # makedirs(render_path, exist_ok=True)
     makedirs(render_integral_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
+    makedirs(render_integral_ironbow_path, exist_ok=True)
+    makedirs(gts_ironbow_path, exist_ok=True)
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         torch.cuda.synchronize()
@@ -57,10 +64,10 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
             if start_time < 0:
                 start_time = 0.0
             t_value = torch.linspace(start_time, time.squeeze(), step_n, requires_grad=True).unsqueeze(1).unsqueeze(1).repeat(1, num_points, 1).cuda()
-            t_value_embedding = encoding_position(t_value).to(device='cuda:1')
+            t_value_embedding = encoding_position(t_value).to(device=gaussians.thermal_device)
             temppred_t_value, env_temp, windspeed = gaussians.Temp_TimeNet(t_value, position_embedding.repeat(step_n, 1, 1))
-            temp_integral_value, gaussians.ConvectiveHeatTransfer, gaussians.Emissivity, gaussians.HeatCapacity = gaussians.Temp_Time_DerivativeNet(temppred_t_value.to(device='cuda:1'), env_temp.to(device='cuda:1'), windspeed.to(device='cuda:1'), gaussians.space_feature.repeat(step_n, 1, 1).to(device='cuda:1'), position_embedding.repeat(step_n, 1, 1).to(device='cuda:1'), gaussians.max_temp, gaussians.min_temp, gaussians.time_interval, t_value_embedding)
-            temp_integral_sumvalue = torch.trapezoid(temp_integral_value.permute(1, 2, 0), t_value.permute(1, 2, 0).to(device='cuda:1'))#, dx=(viewpoint_cam.time/(step_n - 1)).repeat(1, num_points, 1))
+            temp_integral_value, gaussians.ConvectiveHeatTransfer, gaussians.Emissivity, gaussians.HeatCapacity = gaussians.Temp_Time_DerivativeNet(temppred_t_value.to(device=gaussians.thermal_device), env_temp.to(device=gaussians.thermal_device), windspeed.to(device=gaussians.thermal_device), gaussians.space_feature.repeat(step_n, 1, 1).to(device=gaussians.thermal_device), position_embedding.repeat(step_n, 1, 1).to(device=gaussians.thermal_device), gaussians.max_temp, gaussians.min_temp, gaussians.time_interval, t_value_embedding)
+            temp_integral_sumvalue = torch.trapezoid(temp_integral_value.permute(1, 2, 0), t_value.permute(1, 2, 0).to(device=gaussians.thermal_device))#, dx=(viewpoint_cam.time/(step_n - 1)).repeat(1, num_points, 1))
             print(temp_integral_sumvalue, gaussians.ConvectiveHeatTransfer, gaussians.Emissivity, gaussians.HeatCapacity)
             print(torch.max(gaussians.ConvectiveHeatTransfer), torch.min(gaussians.ConvectiveHeatTransfer))
             print(torch.max(gaussians.Emissivity), torch.min(gaussians.Emissivity))
@@ -82,10 +89,10 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
             if start_time < 0:
                 start_time = 0.0
             t_value = torch.linspace(start_time, view.time.squeeze(), step_n, requires_grad=True).unsqueeze(1).unsqueeze(1).repeat(1, num_points, 1).cuda()
-            t_value_embedding = encoding_position(t_value).to(device='cuda:1')
+            t_value_embedding = encoding_position(t_value).to(device=gaussians.thermal_device)
             temppred_t_value, env_temp, windspeed = gaussians.Temp_TimeNet(t_value, position_embedding.repeat(step_n, 1, 1))
-            temp_integral_value, gaussians.ConvectiveHeatTransfer, gaussians.Emissivity, gaussians.HeatCapacity = gaussians.Temp_Time_DerivativeNet(temppred_t_value.to(device='cuda:1'), env_temp.to(device='cuda:1'), windspeed.to(device='cuda:1'),gaussians.space_feature.repeat(step_n, 1, 1).to(device='cuda:1'), position_embedding.repeat(step_n, 1, 1).to(device='cuda:1'), gaussians.max_temp, gaussians.min_temp, gaussians.time_interval, t_value_embedding)
-            temp_integral_sumvalue = torch.trapezoid(temp_integral_value.permute(1, 2, 0), t_value.permute(1, 2, 0).to(device='cuda:1'))#, dx=(viewpoint_cam.time/(step_n - 1)).repeat(1, num_points, 1))
+            temp_integral_value, gaussians.ConvectiveHeatTransfer, gaussians.Emissivity, gaussians.HeatCapacity = gaussians.Temp_Time_DerivativeNet(temppred_t_value.to(device=gaussians.thermal_device), env_temp.to(device=gaussians.thermal_device), windspeed.to(device=gaussians.thermal_device),gaussians.space_feature.repeat(step_n, 1, 1).to(device=gaussians.thermal_device), position_embedding.repeat(step_n, 1, 1).to(device=gaussians.thermal_device), gaussians.max_temp, gaussians.min_temp, gaussians.time_interval, t_value_embedding)
+            temp_integral_sumvalue = torch.trapezoid(temp_integral_value.permute(1, 2, 0), t_value.permute(1, 2, 0).to(device=gaussians.thermal_device))#, dx=(viewpoint_cam.time/(step_n - 1)).repeat(1, num_points, 1))
             temp_integral = gaussians.Temp_TimeNet(torch.tensor(start_time).view(1, 1, 1).repeat(1, num_points, 1).cuda(), position_embedding)[0].squeeze(0) - temp_integral_sumvalue.to(device='cuda:0')
             gaussians._features_dc = temppred.squeeze(0).unsqueeze(1).repeat(1, 1, 3)
             render_pkg = render(view, gaussians, pipeline, background, debug=False)
@@ -94,8 +101,16 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         torch.cuda.synchronize()
 
         gt = view.original_image[0:3, :, :]
-        torchvision.utils.save_image(render_pkg_integral["render"], os.path.join(render_integral_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+        render_gray = render_pkg_integral["render"]
+        render_ironbow = gray_to_ironbow_tensor(render_gray)
+        gt_ironbow = view.original_thermal_image
+        if gt_ironbow is None:
+            gt_ironbow = gray_to_ironbow_tensor(gt)
+        filename = '{0:05d}'.format(idx) + ".png"
+        torchvision.utils.save_image(render_gray, os.path.join(render_integral_path, filename))
+        torchvision.utils.save_image(gt, os.path.join(gts_path, filename))
+        torchvision.utils.save_image(render_ironbow, os.path.join(render_integral_ironbow_path, filename))
+        torchvision.utils.save_image(gt_ironbow, os.path.join(gts_ironbow_path, filename))
         # for k in render_pkg.keys():
         #     if render_pkg[k].dim()<3 or k=="render" or k=="delta_normal_norm":
         #         continue

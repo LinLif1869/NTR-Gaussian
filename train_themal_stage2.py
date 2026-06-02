@@ -97,7 +97,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 if start_time < 0:
                     start_time = torch.tensor(0.0)
                 t_value = torch.linspace(start_time, viewpoint_cam.time.squeeze(), step_n, requires_grad=True).unsqueeze(1).unsqueeze(1).repeat(1, num_points, 1).cuda()
-                t_value_embedding = encoding_position(t_value).to(device='cuda:1')
+                t_value_embedding = encoding_position(t_value).to(device=gaussians.thermal_device)
                 temppred_t_value, env_temp, windspeed = gaussians.Temp_TimeNet(t_value, position_embedding.repeat(step_n, 1, 1))
 
                 # Add loss to constrain env_temp around gaussians.env_temp and ensure smoothness
@@ -118,8 +118,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 loss += loss_smooth[0]
 
                 # temp_integral_value, _, _, _ = gaussians.Temp_Time_DerivativeNet(temppred_t_value, gaussians.env_temp.repeat(step_n, num_points, 1).to(device='cuda:1'), gaussians.wind_speed.repeat(step_n, num_points, 1).to(device='cuda:1'),gaussians.space_feature.repeat(step_n, 1, 1).to(device='cuda:1'), position_embedding.repeat(step_n, 1, 1).to(device='cuda:1'), gaussians.max_temp, gaussians.min_temp, gaussians.time_interval, t_value_embedding)
-                temp_integral_value, _, _, _ = gaussians.Temp_Time_DerivativeNet(temppred_t_value.to(device='cuda:1'), env_temp.to(device='cuda:1'), windspeed.to(device='cuda:1'), gaussians.space_feature.repeat(step_n, 1, 1).to(device='cuda:1'), position_embedding.repeat(step_n, 1, 1).to(device='cuda:1'), gaussians.max_temp, gaussians.min_temp, gaussians.time_interval, t_value_embedding)
-                temp_integral_sumvalue = torch.trapezoid(temp_integral_value.permute(1, 2, 0), t_value.permute(1, 2, 0).to(device='cuda:1'))
+                temp_integral_value, _, _, _ = gaussians.Temp_Time_DerivativeNet(temppred_t_value.to(device=gaussians.thermal_device), env_temp.to(device=gaussians.thermal_device), windspeed.to(device=gaussians.thermal_device), gaussians.space_feature.repeat(step_n, 1, 1).to(device=gaussians.thermal_device), position_embedding.repeat(step_n, 1, 1).to(device=gaussians.thermal_device), gaussians.max_temp, gaussians.min_temp, gaussians.time_interval, t_value_embedding)
+                temp_integral_sumvalue = torch.trapezoid(temp_integral_value.permute(1, 2, 0), t_value.permute(1, 2, 0).to(device=gaussians.thermal_device))
 
                 # Add loss to minimize temp_integral_sumvalue
                 loss_temp_integral = torch.mean(temp_integral_sumvalue ** 2).to(device='cuda:0')  # L2 loss to minimize the value
@@ -272,7 +272,10 @@ def training_report(tb_writer, iteration, Ll1, loss, losses_extra, l1_loss, elap
                 for idx, viewpoint in enumerate(config['cameras']):
                     if renderArgs[0].feature_time:
                         num_points = scene.gaussians._xyz.shape[0]
-                        scene.gaussians._features_dc = scene.gaussians.Temp_TimeNet(viewpoint.time, num_points)
+                        position_embedding = encoding_position(scene.gaussians._xyz.detach()).unsqueeze(0)
+                        times = viewpoint.time.repeat(1, num_points, 1)
+                        temppred, _, _ = scene.gaussians.Temp_TimeNet(times, position_embedding)
+                        scene.gaussians._features_dc = temppred.squeeze(0).unsqueeze(1).repeat(1, 1, 3)
 
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0)

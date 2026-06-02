@@ -81,8 +81,10 @@ class GaussianModel:
         self.defualt_env_temp = torch.tensor(((36 + 273.15) - self.min_temp) / (self.max_temp - self.min_temp)).float().unsqueeze(0).unsqueeze(0).unsqueeze(0).cuda()
         self.defualt_wind_speed = torch.tensor(17.0 / 50.0).float().unsqueeze(0).unsqueeze(0).unsqueeze(0).cuda()
         self.Temp_TimeNet = Temp_TimeNet().cuda()
-
-        self.Temp_Time_DerivativeNet = Temp_Time_DerivativeNet().to(device='cuda:1')
+        if torch.cuda.device_count() < 2:
+            raise RuntimeError("NTR-Gaussian training requires two CUDA GPUs: cuda:0 and cuda:1")
+        self.thermal_device = "cuda:1"
+        self.Temp_Time_DerivativeNet = Temp_Time_DerivativeNet().to(device=self.thermal_device)
         self.ConvectiveHeatTransfer = torch.empty(0)
         self.Emissivity = torch.empty(0)
         self.HeatCapacity = torch.empty(0)
@@ -119,6 +121,36 @@ class GaussianModel:
         self.inverse_opacity_activation = inverse_sigmoid
 
         self.rotation_activation = torch.nn.functional.normalize
+
+    def configure_thermal(self, metadata):
+        if not metadata:
+            return
+        if "time_interval" in metadata:
+            self.time_interval = float(metadata["time_interval"])
+        if "min_value" in metadata:
+            self.min_temp = float(metadata["min_value"]) + 273.15
+        if "max_value" in metadata:
+            self.max_temp = float(metadata["max_value"]) + 273.15
+        if "T_env" in metadata:
+            normalized_env_temp = (
+                (float(metadata["T_env"]) + 273.15) - self.min_temp
+            ) / (self.max_temp - self.min_temp)
+            self.defualt_env_temp = torch.tensor(normalized_env_temp).float().view(1, 1, 1).cuda()
+
+    def _prepare_space_features(self, space_features):
+        if space_features is None:
+            raise ValueError("space_features are required when feature_time is enabled")
+        if space_features.shape[0] != self._xyz.shape[0]:
+            raise ValueError(
+                f"space feature count {space_features.shape[0]} does not match point count {self._xyz.shape[0]}"
+            )
+        if space_features.shape[1] == 32:
+            selected_features = space_features
+        elif space_features.shape[1] > 32:
+            selected_features = space_features[:, -33:-1]
+        else:
+            raise ValueError(f"Expected at least 32 space feature channels, got {space_features.shape[1]}")
+        return torch.nn.functional.normalize(selected_features, p=2, dim=1).unsqueeze(0)
 
     @property
     def get_scaling(self):
@@ -215,12 +247,12 @@ class GaussianModel:
         rots[:, 0] = 1
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
-        self.space_feature = torch.nn.functional.normalize(space_features[:, -33:-1], p=2, dim=1).unsqueeze(0)
-        # self.space_feature = space_features.unsqueeze(0)
         if self.feature_time:
             self._xyz = fused_point_cloud
         else:
             self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self.space_feature = self._prepare_space_features(space_features)
+        # self.space_feature = space_features.unsqueeze(0)
         if not self.brdf:
             if self.feature_time:
                 self._features_dc = features[:,:,0:1].transpose(1, 2).contiguous()
@@ -425,7 +457,7 @@ class GaussianModel:
         # self.HeatCapacityNet.load_state_dict(ckpt['HeatCapacityNet'])
 
         self.Temp_Time_DerivativeNet.load_state_dict(ckpt['Temp_Time_DerivativeNet'])
-        self.space_feature = torch.nn.functional.normalize(space_features[:, -33:-1], p=2, dim=1).unsqueeze(0)
+        self.space_feature = self._prepare_space_features(space_features)
         # self.space_feature = space_features.unsqueeze(0)
     def load_ply(self, path, og_number_points=-1):
         self.og_number_points = og_number_points

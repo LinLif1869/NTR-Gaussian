@@ -25,17 +25,23 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser
 import cv2
 import numpy as np
+from utils.ironbow_utils import ironbow_to_gray_rgb_pil
+
 def readImages(renders_dir, gt_dir):
     renders = []
     gts = []
+    gray_renders = []
+    gray_gts = []
     image_names = []
-    for fname in os.listdir(renders_dir):
-        render = Image.open(renders_dir / fname)
-        gt = Image.open(gt_dir / fname)
+    for fname in sorted(os.listdir(renders_dir)):
+        render = Image.open(renders_dir / fname).convert("RGB")
+        gt = Image.open(gt_dir / fname).convert("RGB")
         renders.append(tf.to_tensor(render).unsqueeze(0)[:, :3, :, :].cuda())
         gts.append(tf.to_tensor(gt).unsqueeze(0)[:, :3, :, :].cuda())
+        gray_renders.append(tf.to_tensor(ironbow_to_gray_rgb_pil(render)).unsqueeze(0)[:, :3, :, :].cuda())
+        gray_gts.append(tf.to_tensor(ironbow_to_gray_rgb_pil(gt)).unsqueeze(0)[:, :3, :, :].cuda())
         image_names.append(fname)
-    return renders, gts, image_names
+    return renders, gts, gray_renders, gray_gts, image_names
 
 # def l1_loss(network_output, gt):
 #     return torch.abs((network_output - gt)).mean()
@@ -122,6 +128,14 @@ def save_temperature_images(image, gt_image, image_name,output_dir, min_temp=10,
 
     return mae_temp
 
+def load_temperature_bounds(scene_dir):
+    metadata_path = os.path.join(scene_dir, "thermal_metadata.json")
+    if not os.path.exists(metadata_path):
+        return 10.0, 50.0
+    with open(metadata_path, "r", encoding="utf-8") as metadata_file:
+        metadata = json.load(metadata_file)
+    return float(metadata.get("min_value", 10.0)), float(metadata.get("max_value", 50.0))
+
 def temp_mae(image,gt_image,image_name,min_temp = -15.0,max_temp = 25.0):
 
     depth_folder = '/home/ps/code/gaussian-mesh-splatting/data/Buildings_5_times/depths'
@@ -174,6 +188,7 @@ def evaluate(gs_type, model_paths):
             per_view_dict_polytopeonly[scene_dir] = {}
 
             test_dir = Path(scene_dir) / "test"
+            min_temp, max_temp = load_temperature_bounds(scene_dir)
 
             for method in os.listdir(test_dir):
                 print("Method:", method)
@@ -184,17 +199,20 @@ def evaluate(gs_type, model_paths):
                 per_view_dict_polytopeonly[scene_dir][method] = {}
 
                 method_dir = test_dir / method
-                gt_dir = method_dir/ "gt"
+                gt_dir = method_dir / "gt_ironbow"
                 vis_dir = method_dir/ "temp_viz"
-                renders_dir = method_dir / f"renders{gs_type}"
-                renders, gts, image_names = readImages(renders_dir, gt_dir)
+                renders_dir = method_dir / f"renders{gs_type}_ironbow"
+                renders, gts, gray_renders, gray_gts, image_names = readImages(renders_dir, gt_dir)
 
                 ssims = []
                 psnrs = []
                 lpipss = []
                 mae_temp = []
                 for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
-                    mae_temp.append(save_temperature_images(renders[idx], gts[idx],image_names[idx],vis_dir))
+                    mae_temp.append(save_temperature_images(
+                        gray_renders[idx], gray_gts[idx], image_names[idx], vis_dir,
+                        min_temp=min_temp, max_temp=max_temp,
+                    ))
                     ssims.append(ssim(renders[idx], gts[idx]))
                     psnrs.append(psnr(renders[idx], gts[idx]))
                     # lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
@@ -227,7 +245,7 @@ if __name__ == "__main__":
 
     # Set up command line argument parser
     parser = ArgumentParser(description="Metrics script parameters")
-    parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default='/home/yk98/Themal_TempGS-master/datasets/output_feicuiwan0707/s1_all_real_smooth_0926_copy')
-    parser.add_argument('--gs_type', type=str, default="")
+    parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str)
+    parser.add_argument('--gs_type', type=str, default="_integral")
     args = parser.parse_args()
     evaluate(args.gs_type, args.model_paths)

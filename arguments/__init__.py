@@ -47,8 +47,8 @@ class ParamGroup:
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 0
-        self._source_path = "/home/yk98/Themal_TempGS-master_nodata/datasets/feicuiwan77_1/s1"
-        self._model_path = "/home/yk98/Themal_TempGS-master_nodata/outputs/feicuiwan0707_1/s1_all_real_smooth_20250706_stage2"
+        self._source_path = ""
+        self._model_path = ""
         self._images = "images"
         self._resolution = -1
         self._white_background = False

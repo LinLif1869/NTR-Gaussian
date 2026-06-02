@@ -215,7 +215,10 @@ def training_report(tb_writer, iteration, Ll1, loss, losses_extra, l1_loss, elap
                 for idx, viewpoint in enumerate(config['cameras']):
                     if renderArgs[0].feature_time:
                         num_points = scene.gaussians._xyz.shape[0]
-                        scene.gaussians._features_dc = scene.gaussians.Temp_TimeNet(viewpoint.time, num_points)
+                        position_embedding = encoding_position(scene.gaussians._xyz.detach()).unsqueeze(0)
+                        times = viewpoint.time.repeat(1, num_points, 1)
+                        temppred, _, _ = scene.gaussians.Temp_TimeNet(times, position_embedding)
+                        scene.gaussians._features_dc = temppred.squeeze(0).unsqueeze(1).repeat(1, 1, 3)
 
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0)

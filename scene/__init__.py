@@ -20,6 +20,7 @@ from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 import torch
 from utils.system_utils import mkdir_p
 from scene.NVDIFFREC import save_env_map, load_env
+from scene.dynamic_rgbt_metadata import is_nerfies_dataset
 
 class Scene:
 
@@ -43,7 +44,10 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
         # print(os.path.join(args.source_path, "transforms_train.json"))
-        if os.path.exists(os.path.join(args.source_path, "sparse")):
+        if is_nerfies_dataset(args.source_path):
+            print("Found Nerfies dataset!")
+            scene_info = sceneLoadTypeCallbacks["Nerfies"](args.source_path, args.eval)
+        elif os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
@@ -73,6 +77,10 @@ class Scene:
             random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
+        self.gaussians.configure_thermal(scene_info.thermal_metadata)
+        if scene_info.thermal_metadata:
+            with open(os.path.join(self.model_path, "thermal_metadata.json"), "w") as metadata_file:
+                json.dump(scene_info.thermal_metadata, metadata_file, indent=2)
 
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")

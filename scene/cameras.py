@@ -18,7 +18,7 @@ class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid, time,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", 
-                 normal_image=None,
+                 normal_image=None, thermal_image=None,
                  ):
         super(Camera, self).__init__()
 
@@ -38,6 +38,10 @@ class Camera(nn.Module):
             self.data_device = torch.device("cuda")
 
         self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
+        self.original_thermal_image = (
+            thermal_image.clamp(0.0, 1.0).to(self.data_device)
+            if thermal_image is not None else None
+        )
         if normal_image is not None:
             self.original_normal_image = normal_image.clamp(0.0, 1.0).to(self.data_device)
             original_normal_image = self.original_normal_image * 2 - 1. # (0, 1) -> (-1, 1)
@@ -96,4 +100,3 @@ class MiniCam:
         self.full_proj_transform = full_proj_transform
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
-

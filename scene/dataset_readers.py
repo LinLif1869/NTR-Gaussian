@@ -11,7 +11,6 @@
 
 import os
 import sys
-import trimesh
 import json
 import torch
 from games.mesh_time_splatting.utils.graphics_utils import MeshPointCloud, MeshBasePointCloud
@@ -27,6 +26,8 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+from scene.dynamic_rgbt_metadata import build_frame_times, find_nerfies_root, load_optional_thermal_metadata
+from utils.ironbow_utils import ironbow_to_gray_rgb_pil
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -42,6 +43,7 @@ class CameraInfo(NamedTuple):
     normal_image: np.array
     alpha_mask: np.array
     time : float
+    thermal_image: np.array = None
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -49,8 +51,9 @@ class SceneInfo(NamedTuple):
     test_cameras: list
     nerf_normalization: dict
     ply_path: str
-    maxtime: int
-    spacefeatures: torch.tensor
+    maxtime: float = None
+    spacefeatures: torch.tensor = None
+    thermal_metadata: dict = None
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -496,6 +499,8 @@ def readNerfSyntheticMeshTimeInfo(path, white_background, eval, num_splats=3, ex
 def readNerfSyntheticMeshInfo(
         path, white_background, eval, num_splats, extension=".png"
 ):
+    import trimesh
+
     timestamp_mapper =None
     max_time =None
     print("Reading Training Transforms")
@@ -563,9 +568,174 @@ def readNerfSyntheticMeshInfo(
                            maxtime = max_time)
     return scene_info
 
+def _load_json(path):
+    with open(path, "r", encoding="utf-8") as json_file:
+        return json.load(json_file)
+
+def _find_nerfies_image_dir(root):
+    for dirname in ("rgb", "images"):
+        image_dir = os.path.join(root, dirname)
+        if not os.path.isdir(image_dir):
+            continue
+        for scale in ("2x", "1x", "4x"):
+            scale_dir = os.path.join(image_dir, scale)
+            if os.path.isdir(scale_dir):
+                return scale_dir
+        return image_dir
+    raise FileNotFoundError(f"Nerfies image folder not found under {root}")
+
+def _find_image_path(image_dir, image_id):
+    for extension in (".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"):
+        path = os.path.join(image_dir, image_id + extension)
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(f"Image '{image_id}' not found under {image_dir}")
+
+def _camera_from_nerfies(camera_json, width, height):
+    orientation = np.asarray(camera_json["orientation"], dtype=np.float32)
+    position = np.asarray(camera_json["position"], dtype=np.float32)
+    R = orientation.T
+    T = -position @ R
+
+    focal = camera_json["focal_length"]
+    if isinstance(focal, (list, tuple)):
+        focal_x = float(focal[0])
+        focal_y = float(focal[1]) if len(focal) > 1 else focal_x
+    else:
+        focal_x = focal_y = float(focal)
+
+    base_size = camera_json.get("image_size")
+    if base_size is not None:
+        focal_x *= width / float(base_size[0])
+        focal_y *= height / float(base_size[1])
+    focal_y *= float(camera_json.get("pixel_aspect_ratio", 1.0))
+    return R, T, focal2fov(focal_y, height), focal2fov(focal_x, width)
+
+def _thermal_image_to_gray(image):
+    rgb = np.asarray(image.convert("RGB"))
+    if np.array_equal(rgb[..., 0], rgb[..., 1]) and np.array_equal(rgb[..., 1], rgb[..., 2]):
+        return image.convert("RGB")
+    return ironbow_to_gray_rgb_pil(image)
+
+def _load_nerfies_point_cloud(path, modality_root):
+    roots = [path, modality_root, os.path.join(path, "rgb"), os.path.join(path, "thermal")]
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for filename in ("mesh.ply", "points3D.ply", "points3d.ply"):
+            ply_path = os.path.join(root, filename)
+            if os.path.exists(ply_path):
+                return fetchPly(ply_path), ply_path
+        points_path = os.path.join(root, "points.npy")
+        if os.path.exists(points_path):
+            points = np.load(points_path)
+            if points.ndim != 2 or points.shape[1] < 3:
+                raise ValueError(f"Expected points.npy with shape (N, >=3), got {points.shape}")
+            xyz = np.asarray(points[:, :3], dtype=np.float32)
+            if points.shape[1] >= 6:
+                rgb = np.asarray(points[:, 3:6], dtype=np.float32)
+                if rgb.max() <= 1.0:
+                    rgb *= 255.0
+            else:
+                rgb = np.full((xyz.shape[0], 3), 127, dtype=np.float32)
+            ply_path = os.path.join(root, "points3D.ply")
+            storePly(ply_path, xyz, rgb.clip(0, 255))
+            return fetchPly(ply_path), ply_path
+    raise FileNotFoundError("Nerfies scene requires mesh.ply, points3D.ply, points3d.ply, or points.npy")
+
+def _load_space_features(path, modality_root, num_points):
+    for root in (path, modality_root, os.path.join(path, "rgb"), os.path.join(path, "thermal")):
+        feature_path = os.path.join(root, "space_features.npy")
+        if os.path.exists(feature_path):
+            features = np.load(feature_path)
+            if features.ndim != 2 or features.shape[0] != num_points or features.shape[1] < 32:
+                raise ValueError(
+                    f"Expected space_features.npy with shape ({num_points}, >=32), got {features.shape}"
+                )
+            return torch.tensor(features, dtype=torch.float32).cuda()
+    print("space_features.npy not found; using constant 32D features.")
+    return torch.ones(num_points, 32, dtype=torch.float32).cuda()
+
+def _get_nerfies_splits(dataset_json, eval, llffhold=8):
+    ids = list(dataset_json.get("ids", []))
+    if not ids:
+        raise ValueError("Nerfies dataset.json does not contain any ids")
+    if not eval:
+        return ids, []
+
+    test_ids = set(dataset_json.get("val_ids", []))
+    if not test_ids:
+        test_ids = {image_id for index, image_id in enumerate(ids) if index % llffhold == 0}
+    configured_train_ids = set(dataset_json.get("train_ids", []))
+    train_ids = configured_train_ids or (set(ids) - test_ids)
+    return [image_id for image_id in ids if image_id in train_ids], [
+        image_id for image_id in ids if image_id in test_ids
+    ]
+
+def readNerfiesThermalSceneInfo(path, eval, llffhold=8):
+    modality_root = find_nerfies_root(path)
+    if modality_root is None:
+        raise FileNotFoundError("Nerfies scene requires dataset.json and camera/")
+
+    dataset_json = _load_json(os.path.join(modality_root, "dataset.json"))
+    metadata_path = os.path.join(modality_root, "metadata.json")
+    frame_metadata = _load_json(metadata_path) if os.path.exists(metadata_path) else {}
+    train_ids, test_ids = _get_nerfies_splits(dataset_json, eval, llffhold)
+    all_ids = train_ids + [image_id for image_id in test_ids if image_id not in set(train_ids)]
+    image_dir = _find_nerfies_image_dir(modality_root)
+
+    raw_times = []
+    for index, image_id in enumerate(all_ids):
+        metadata = frame_metadata.get(image_id, {})
+        raw_times.append(float(metadata.get("time_id", metadata.get("warp_id", index))))
+    min_time = min(raw_times)
+    max_time = max(raw_times)
+    duration = max(max_time - min_time, 1.0)
+
+    cameras = {}
+    for index, (image_id, raw_time) in enumerate(zip(all_ids, raw_times)):
+        image_path = _find_image_path(image_dir, image_id)
+        thermal_image = Image.open(image_path).convert("RGB")
+        image = _thermal_image_to_gray(thermal_image)
+        width, height = image.size
+        camera_json = _load_json(os.path.join(modality_root, "camera", image_id + ".json"))
+        R, T, FovY, FovX = _camera_from_nerfies(camera_json, width, height)
+        cameras[image_id] = CameraInfo(
+            uid=index, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+            image_path=image_path, image_name=image_id, width=width, height=height,
+            normal_image=None, alpha_mask=None,
+            time=torch.tensor((raw_time - min_time) / duration).view(1, 1, 1).cuda(),
+            thermal_image=thermal_image,
+        )
+
+    train_cameras = [cameras[image_id] for image_id in train_ids]
+    test_cameras = [cameras[image_id] for image_id in test_ids]
+    pcd, ply_path = _load_nerfies_point_cloud(path, modality_root)
+    space_features = _load_space_features(path, modality_root, len(pcd.points))
+    thermal_metadata = load_optional_thermal_metadata(path)
+    fps = float(thermal_metadata.get("fps", 30.0))
+    if fps <= 0:
+        fps = 30.0
+        thermal_metadata["fps"] = fps
+    frame_count = len(dataset_json["ids"])
+    frame_times = build_frame_times(frame_count, fps)
+    thermal_metadata["frame_count"] = frame_count
+    thermal_metadata["time_interval"] = frame_times[-1] if len(frame_times) > 1 else 1.0 / fps
+    return SceneInfo(
+        point_cloud=pcd,
+        train_cameras=train_cameras,
+        test_cameras=test_cameras,
+        nerf_normalization=getNerfppNorm(train_cameras or test_cameras),
+        ply_path=ply_path,
+        maxtime=thermal_metadata["time_interval"],
+        spacefeatures=space_features,
+        thermal_metadata=thermal_metadata,
+    )
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo,
     "Blender_Mesh_time": readNerfSyntheticMeshTimeInfo,
     "Blender_Mesh": readNerfSyntheticMeshInfo,
+    "Nerfies": readNerfiesThermalSceneInfo,
 }
