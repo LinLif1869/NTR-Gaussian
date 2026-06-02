@@ -9,6 +9,7 @@ fi
 SOURCE_PATH="$1"
 STAGE1_OUTPUT="$2"
 STAGE2_OUTPUT="${3:-${STAGE1_OUTPUT}_stage2}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ ! -f "$SOURCE_PATH/dataset.json" ] && \
    [ ! -f "$SOURCE_PATH/thermal/dataset.json" ] && \
@@ -20,7 +21,7 @@ if [ ! -f "$SOURCE_PATH/dataset.json" ] && \
     exit 1
 fi
 
-python train_themal_stage1.py -s "$SOURCE_PATH" -m "$STAGE1_OUTPUT"
+python "$ROOT_DIR/train_themal_stage1.py" -s "$SOURCE_PATH" -m "$STAGE1_OUTPUT"
 
 if [ -e "$STAGE2_OUTPUT" ]; then
     echo "Error: stage-2 output already exists: $STAGE2_OUTPUT"
@@ -29,4 +30,4 @@ if [ -e "$STAGE2_OUTPUT" ]; then
 fi
 
 cp -r "$STAGE1_OUTPUT" "$STAGE2_OUTPUT"
-python train_themal_stage2.py -s "$SOURCE_PATH" -m "$STAGE2_OUTPUT"
+python "$ROOT_DIR/train_themal_stage2.py" -s "$SOURCE_PATH" -m "$STAGE2_OUTPUT"
